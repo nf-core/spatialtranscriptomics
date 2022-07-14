@@ -39,12 +39,18 @@ ch_multiqc_custom_config = params.multiqc_config ? Channel.fromPath(params.multi
 */
 
 //
+// MODULE: Loaded from modules/local/
+//
+include { READ_ST_AND_SC_DATA } from '../modules/local/read_st_and_sc_data'
+
+//
 // SUBWORKFLOW: Consisting of a mix of local and nf-core/modules
 //
-include { INPUT_CHECK             } from '../subworkflows/local/input_check'
-include { ST_LOAD_PREPROCESS_DATA } from '../subworkflows/local/stLoadPreprocessData'
-include { ST_MISCELLANEOUS_TOOLS  } from '../subworkflows/local/stMiscellaneousTools'
-include { ST_POSTPROCESSING       } from '../subworkflows/local/stPostprocessing'
+include { INPUT_CHECK        } from '../subworkflows/local/input_check'
+include { PREPROCESS_SC_DATA } from '../subworkflows/local/preprocess_sc_data'
+include { PREPROCESS_ST_DATA } from '../subworkflows/local/preprocess_st_data'
+include { SPACERANGER        } from '../subworkflows/local/spaceranger'
+include { ST_POSTPROCESSING  } from '../subworkflows/local/st_postprocessing'
 
 /*
 ================================================================================
@@ -71,6 +77,7 @@ def multiqc_report = []
 //
 workflow ST {
 
+    // TODO: Collect versions for all modules/subworkflows
     ch_versions = Channel.empty()
 
     //
@@ -82,29 +89,62 @@ workflow ST {
     ch_versions = ch_versions.mix(INPUT_CHECK.out.versions)
 
     //
-    // Loading and pre-processing of ST and SC data
+    // SUBWORKFLOW: SpaceRanger raw data processing
     //
-    ST_LOAD_PREPROCESS_DATA (
-        INPUT_CHECK.out.reads
-    )
-
-    //
-    // Deconvolution with SC data (optional; do not run by default)
-    //
-    if (params.run_deconvolution) {
-        ST_MISCELLANEOUS_TOOLS(
-            ST_LOAD_PREPROCESS_DATA.out.st_adata_x,
-            ST_LOAD_PREPROCESS_DATA.out.st_adata_var,
-            ST_LOAD_PREPROCESS_DATA.out.st_adata_obs
+    if ( params.run_spaceranger ) {
+        SPACERANGER (
+            params.spaceranger_input
         )
+        ch_st_data = SPACERANGER.out.sr_out
+        ch_versions = ch_versions.mix(SPACERANGER.out.versions)
+    } else {
+        ch_st_data = INPUT_CHECK.out.reads
     }
 
     //
-    // Post-processing and reporting
+    // MODULE: Read ST and SC data and save as `anndata`
+    //
+    READ_ST_AND_SC_DATA (
+        ch_st_data
+    )
+    ch_versions = ch_versions.mix(READ_ST_AND_SC_DATA.out.versions)
+
+    // TODO: Add file manifest or other non-hard-coded path
+    //
+    // Channel for mitochondrial data
+    //
+    ch_mito_data = Channel
+        .fromPath("ftp://ftp.broadinstitute.org/distribution/metabolic/papers/Pagliarini/MitoCarta2.0/Human.MitoCarta2.0.txt")
+
+    //
+    // SUBWORKFLOW: Pre-processing of ST  data
+    //
+    PREPROCESS_ST_DATA (
+        READ_ST_AND_SC_DATA.out.st_counts,
+        READ_ST_AND_SC_DATA.out.st_raw,
+        ch_mito_data
+    )
+    ch_versions = ch_versions.mix(PREPROCESS_ST_DATA.out.versions)
+
+    //
+    // SUBWORKFLOW (optional): Pre-processing of SC data
+    //
+    if ( params.single_cell ) {
+        PREPROCESS_SC_DATA (
+            READ_ST_AND_SC_DATA.out.sc_counts,
+            READ_ST_AND_SC_DATA.out.sc_raw,
+            ch_mito_data
+        )
+        ch_versions = ch_versions.mix(PREPROCESS_SC_DATA.out.versions)
+    }
+
+    //
+    // SUBWORKFLOW: Post-processing and reporting
     //
     ST_POSTPROCESSING (
-        ST_LOAD_PREPROCESS_DATA.out.st_data_norm
+        PREPROCESS_ST_DATA.out.st_data_norm
     )
+    ch_versions = ch_versions.mix(ST_POSTPROCESSING.out.versions)
 }
 
 /*
